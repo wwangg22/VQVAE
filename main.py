@@ -5,6 +5,7 @@ import numpy as np
 from utils import PNGImageDataset, compute_dataset_variance
 from torch.utils.data import DataLoader
 import torchvision.transforms as T
+import cv2
 
 transform = T.Compose([
     T.ToTensor()           # scales [0, 255] -> [0, 1] for each channel
@@ -14,7 +15,8 @@ transform = T.Compose([
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-model = VQVAE(h_dim=256, n_embeddings=32, embedding_dim=32).to(device)
+model = VQVAE(h_dim=512, n_embeddings=32, embedding_dim=32, scale_factor=6).to(device)
+# model.load_model("model.pth")
 
 optimizer = optim.Adam(model.parameters(), lr=2e-4, amsgrad=True)
 
@@ -29,11 +31,11 @@ results = {
     'perplexities': [],
 }
 
-log_interval = 100
-save = False
-train_dataset = PNGImageDataset(folder_path='./images', transform=transform)
+log_interval = 10
+save = True
+train_dataset = PNGImageDataset(folder_path='./images_onearena', transform=transform)
 x_train_var = 1.0
-train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True, num_workers=2)
+train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=2)
 
 
 def train():
@@ -66,6 +68,19 @@ def train():
 
             # Logging
             if update_count % log_interval == 0:
+                #display xhat
+                x_hat = x_hat[0].detach().cpu().numpy()
+                # x_hat = np.transpose(x_hat, (0, 2, 3, 1))
+                x_hat_img = np.transpose(x_hat, (1, 2, 0))
+
+                 # If the output is in [0,1], scale it to [0,255]
+                x_hat_img = np.clip(x_hat_img, 0, 1)  # ensure values are within [0,1]
+                x_hat_img = (x_hat_img * 255).astype(np.uint8)
+                x_hat_img = cv2.cvtColor(x_hat_img, cv2.COLOR_RGB2BGR)
+
+                cv2.imshow('xhat', x_hat_img)
+                cv2.waitKey(1)
+
                 if save:
                     model.save_model("model.pth")  # or your chosen file path
 

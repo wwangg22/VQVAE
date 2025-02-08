@@ -5,7 +5,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class Encoder(nn.Module):
 
-    def __init__(self, in_channels, hidden_channels):
+    def __init__(self, in_channels, hidden_channels, scale_factor=1):
         super().__init__()
         self.res_block = nn.Sequential(
             nn.ReLU(inplace=True),
@@ -13,14 +13,29 @@ class Encoder(nn.Module):
             nn.ReLU(inplace=True),
             nn.Conv2d(hidden_channels, hidden_channels, kernel_size=1, stride=1)
         )
-
-        self.conv = nn.Sequential(
-            nn.Conv2d(in_channels, hidden_channels // 2, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(inplace=True),
+        conv_layers = []
+        size = in_channels
+        for i in range(scale_factor):
+            conv_layers.append(
+                nn.Conv2d(size, hidden_channels // (2**(scale_factor-i)), kernel_size=4, stride=2, padding=1)
+            )
+            conv_layers.append(nn.ReLU(inplace=True))
+            size = hidden_channels // (2 ** (scale_factor-i))
+        conv_layers += [
             nn.Conv2d(hidden_channels // 2, hidden_channels, kernel_size=4, stride=2, padding=1),
             nn.ReLU(inplace=True),
             nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, stride=1, padding=1)
-        )
+        ]
+        self.conv = nn.Sequential(*conv_layers)
+        # self.conv = nn.Sequential(
+        #     nn.Conv2d(in_channels, hidden_channels // 4, kernel_size=4, stride=2, padding=1),
+        #     nn.ReLU(inplace=True),
+        #     nn.Conv2d(hidden_channels // 4, hidden_channels//2, kernel_size=4, stride=2, padding=1),
+        #     nn.ReLU(inplace=True),
+        #     nn.Conv2d(hidden_channels // 2, hidden_channels, kernel_size=4, stride=2, padding=1),
+        #     nn.ReLU(inplace=True),
+        #     nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, stride=1, padding=1)
+        # )
 
     def forward(self, x):
 
@@ -34,7 +49,7 @@ class Encoder(nn.Module):
 
 class Decoder(nn.Module):
 
-    def __init__(self, in_channels, hidden_channels, out_channels):
+    def __init__(self, in_channels, hidden_channels, out_channels, scale_factor=1):
         super().__init__()
 
         self.initial = nn.Sequential(
@@ -47,12 +62,27 @@ class Decoder(nn.Module):
             nn.ReLU(inplace=True),
             nn.Conv2d(hidden_channels, hidden_channels, kernel_size=1, stride=1)
         )
+        conv_layers=[]
+        size=hidden_channels
+        for i in range(scale_factor):
+            conv_layers.append(
+                nn.ConvTranspose2d(size, hidden_channels // (2**(i)), kernel_size=4, stride=2, padding=1)
+            )
+            conv_layers.append(nn.ReLU(inplace=True))
+            size = hidden_channels // (2**i)
+        
+        conv_layers += [
+            nn.ConvTranspose2d(hidden_channels // (2**i), out_channels, kernel_size=4, stride =2, padding=1),
+        ]
+        self.conv = nn.Sequential(*conv_layers)
 
-        self.conv = nn.Sequential(
-            nn.ConvTranspose2d(hidden_channels, hidden_channels // 2, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(inplace=True),
-            nn.ConvTranspose2d(hidden_channels // 2, out_channels=out_channels, kernel_size=4, stride=2, padding=1),
-        )
+        # self.conv = nn.Sequential(
+        #     nn.ConvTranspose2d(hidden_channels, hidden_channels // 2, kernel_size=4, stride=2, padding=1),
+        #     nn.ReLU(inplace=True),
+        #     nn.ConvTranspose2d(hidden_channels // 2, out_channels=hidden_channels//4, kernel_size=4, stride=2, padding=1),
+        #     nn.ReLU(inplace=True),
+        #     nn.ConvTranspose2d(hidden_channels // 4, out_channels, kernel_size=4, stride =2, padding=1),
+        # )
 
     def forward(self, x ):
         x = self.initial(x)
@@ -109,7 +139,10 @@ class VectorQuantizer(nn.Module):
         d = torch.sum(z_flattened ** 2, dim=1, keepdim=True) + \
             torch.sum(self.embedding.weight**2, dim=1) - 2 * \
             torch.matmul(z_flattened, self.embedding.weight.t())
-
+        # first torch.sum produces (B*H*W,1) tensor, second torch.sum produces (n_e,) tensor, according to 
+        #broadcasting rules, produces (B*H*W, n_e) tensor
+        # matmul between (B*H*W, e_dim) and (e_dim, n_e) produces (B*H*W, n_e) tensor)
+        #outputs a tensor of shape (B*H*W, n_e)
         # find closest encodings
         min_encoding_indices = torch.argmin(d, dim=1).unsqueeze(1)
         min_encodings = torch.zeros(
@@ -141,17 +174,17 @@ class VectorQuantizer(nn.Module):
 
 class VQVAE(nn.Module):
     def __init__(self, h_dim,
-                 n_embeddings, embedding_dim, beta=0.25, save_img_embedding_map=False):
+                 n_embeddings, embedding_dim, scale_factor=1, beta=0.25, save_img_embedding_map=False):
         super(VQVAE, self).__init__()
         # encode image into continuous latent space
-        self.encoder = Encoder(in_channels=3, hidden_channels=h_dim)
+        self.encoder = Encoder(in_channels=3, hidden_channels=h_dim, scale_factor=scale_factor)
         self.pre_quantization_conv = nn.Conv2d(
             h_dim, embedding_dim, kernel_size=1, stride=1)
         # pass continuous latent vector through discretization bottleneck
         self.vector_quantization = VectorQuantizer(
             n_embeddings, embedding_dim, beta)
         # decode the discrete latent representation
-        self.decoder = Decoder(in_channels=embedding_dim, hidden_channels=h_dim, out_channels=3)
+        self.decoder = Decoder(in_channels=embedding_dim, hidden_channels=h_dim, out_channels=3, scale_factor=scale_factor)
 
         if save_img_embedding_map:
             self.img_to_embedding_map = {i: [] for i in range(n_embeddings)}
@@ -184,6 +217,10 @@ class VQVAE(nn.Module):
         """
         torch.save(self.state_dict(), file_path)
         print(f"Model saved to {file_path}")
+
+    def load_model(self, file_path:str):
+        self.load_state_dict(torch.load(file_path))
+        print(f'model loaded from {file_path}')
 
 
 
